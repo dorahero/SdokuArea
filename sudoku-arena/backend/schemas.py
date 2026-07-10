@@ -118,6 +118,8 @@ class BoardCell(BaseModel):
     event_type: Optional[str] = None   # None, "CHEST", "MONSTER", "TRAP", "ALTAR", "PORTAL", "WEAKNESS"
     is_triggered: bool = False         # 事件是否已解開
     is_foggy: bool = False             # 墨汁屏蔽狀態
+    is_error: bool = False             # 是否填寫錯誤
+    pencil_notes: List[int] = []       # 鉛筆草稿數字標記
 
 class GenerateBoardRequest(BaseModel):
     user_id: int
@@ -133,6 +135,10 @@ class DungeonBoardResponse(BaseModel):
     boss_shield: int = 0
     boss_max_shield: int = 0
     cursed_number: int = 0
+    time_left: int = 180
+    has_strawman: bool = False
+    has_clover: bool = False
+    has_seal: bool = False
     cells: List[BoardCell]
 
 # --- Submit Value Schemas ---

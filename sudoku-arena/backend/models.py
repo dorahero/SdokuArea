@@ -121,6 +121,10 @@ class DungeonProgress(Base):
     boss_shield = Column(Integer, default=0)
     boss_max_shield = Column(Integer, default=0)
     cursed_number = Column(Integer, default=0)         # 目前被詛咒的數字 (0代表無)
+    time_left = Column(Integer, default=180)            # 本層賸餘倒數時間 (秒)
+    has_strawman = Column(Boolean, default=False)       # 是否有替身草人狀態
+    has_clover = Column(Boolean, default=False)         # 是否有幸運四葉草狀態
+    has_seal = Column(Boolean, default=False)           # 是否有封印符咒狀態
 
     user = relationship("User", back_populates="dungeon_progress")
 

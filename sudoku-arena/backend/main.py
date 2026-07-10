@@ -4,7 +4,7 @@ from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 import models
 import schemas
-from database import engine, get_db
+from database import engine, get_db, SessionLocal
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -21,7 +21,27 @@ app.add_middleware(
 # 啟動時自動建立資料表並寫入種子資料
 @app.on_event("startup")
 def startup_event():
-    models.Base.metadata.create_all(bind=engine)
+    # 偵測是否需要重建 Schema
+    rebuild_needed = False
+    try:
+        models.Base.metadata.create_all(bind=engine)
+        from sqlalchemy import inspect
+        inspector = inspect(engine)
+        columns = [col["name"] for col in inspector.get_columns("dungeon_progress")]
+        if "has_strawman" not in columns or "time_left" not in columns:
+            raise Exception("New columns missing in database")
+    except Exception as e:
+        print(f"Schema mismatch detected, rebuilding database: {e}")
+        rebuild_needed = True
+        
+    if rebuild_needed:
+        try:
+            models.Base.metadata.drop_all(bind=engine)
+            models.Base.metadata.create_all(bind=engine)
+            print("Database schema successfully recreated!")
+        except Exception as ex:
+            print(f"Error rebuilding tables: {ex}")
+
     db = next(get_db())
     try:
         seed_initial_data(db)
@@ -190,7 +210,7 @@ def generate_sudoku_board(difficulty: str):
     all_coords = [(r, c) for r in range(9) for c in range(9)]
     holes_coords = random.sample(all_coords, holes_count)
     
-    events = ["CHEST", "MONSTER", "TRAP", "ALTAR", "PORTAL"]
+    events = ["CHEST", "CHEST", "CHEST", "CHEST", "CHEST", "MONSTER", "TRAP", "ALTAR", "PORTAL"]
     
     board_cells = []
     for r in range(9):
@@ -203,7 +223,7 @@ def generate_sudoku_board(difficulty: str):
             
             event_type = None
             if is_hole:
-                if random.random() < 0.25:
+                if random.random() < 0.40:
                     event_type = random.choice(events)
                     
             board_cells.append({
@@ -524,7 +544,11 @@ def generate_dungeon_board(req: schemas.GenerateBoardRequest, db: Session = Depe
             boss_max_hp=0,
             boss_shield=0,
             boss_max_shield=0,
-            cursed_number=0
+            cursed_number=0,
+            time_left=180,
+            has_strawman=False,
+            has_clover=False,
+            has_seal=False
         )
         db.add(progress)
     else:
@@ -538,6 +562,10 @@ def generate_dungeon_board(req: schemas.GenerateBoardRequest, db: Session = Depe
         progress.boss_shield = 0
         progress.boss_max_shield = 0
         progress.cursed_number = 0
+        progress.time_left = 180
+        progress.has_strawman = False
+        progress.has_clover = False
+        progress.has_seal = False
         
     # 寫入生成盤面日誌
     add_action_log(db, req.user_id, user.current_floor, "STAGE_START", f"成功生成了全新地牢盤面，難度：{req.difficulty}。")
@@ -554,6 +582,10 @@ def generate_dungeon_board(req: schemas.GenerateBoardRequest, db: Session = Depe
         boss_shield=progress.boss_shield,
         boss_max_shield=progress.boss_max_shield,
         cursed_number=progress.cursed_number,
+        time_left=progress.time_left,
+        has_strawman=progress.has_strawman,
+        has_clover=progress.has_clover,
+        has_seal=progress.has_seal,
         cells=board_cells
     )
 
@@ -580,6 +612,10 @@ def get_dungeon_board(user_id: int, db: Session = Depends(get_db)):
         boss_shield=progress.boss_shield,
         boss_max_shield=progress.boss_max_shield,
         cursed_number=progress.cursed_number,
+        time_left=progress.time_left,
+        has_strawman=progress.has_strawman,
+        has_clover=progress.has_clover,
+        has_seal=progress.has_seal,
         cells=cells_list
     )
 
@@ -618,7 +654,11 @@ def generate_boss_fight(req: schemas.GenerateBoardRequest, db: Session = Depends
             boss_max_hp=500,
             boss_shield=3,
             boss_max_shield=3,
-            cursed_number=0
+            cursed_number=0,
+            time_left=180,
+            has_strawman=False,
+            has_clover=False,
+            has_seal=False
         )
         db.add(progress)
     else:
@@ -632,6 +672,10 @@ def generate_boss_fight(req: schemas.GenerateBoardRequest, db: Session = Depends
         progress.boss_shield = 3
         progress.boss_max_shield = 3
         progress.cursed_number = 0
+        progress.time_left = 180
+        progress.has_strawman = False
+        progress.has_clover = False
+        progress.has_seal = False
         
     # 寫入 Boss 戰 start log
     add_action_log(db, req.user_id, user.current_floor, "BOSS_START", f"【第 {user.current_floor} 層 Boss 戰開打】強敵【黑龍法王】降臨！(HP: 500 / 護盾: 3)")
@@ -648,6 +692,10 @@ def generate_boss_fight(req: schemas.GenerateBoardRequest, db: Session = Depends
         boss_shield=progress.boss_shield,
         boss_max_shield=progress.boss_max_shield,
         cursed_number=progress.cursed_number,
+        time_left=progress.time_left,
+        has_strawman=progress.has_strawman,
+        has_clover=progress.has_clover,
+        has_seal=progress.has_seal,
         cells=board_cells
     )
 
@@ -706,10 +754,21 @@ def submit_dungeon_value(req: schemas.SubmitValueRequest, db: Session = Depends(
     if not target_cell:
         raise HTTPException(status_code=404, detail="Cell coordinates not found on board")
         
-    if target_cell["is_given"] or target_cell["user_val"] != 0:
+    if target_cell["is_given"] or (target_cell["user_val"] != 0 and not target_cell.get("is_error", False)):
         raise HTTPException(status_code=400, detail="This cell is already resolved and cannot be modified")
         
     is_correct = (req.val == target_cell["solution"])
+    
+    # 📜 封印符咒：將填錯陷阱格轉正並解除
+    if not is_correct and target_cell.get("event_type") == "TRAP" and progress.has_seal:
+        is_correct = True
+        req.val = target_cell["solution"]
+        progress.has_seal = False
+        add_action_log(
+            db, req.user_id, user.current_floor, "EVENT",
+            f"封印符咒 📜 發動！成功封印座標 ({req.row}, {req.col}) 的陷阱，免除傷害並直接揭曉正確答案 {req.val}！"
+        )
+        
     unlocked_achievements = []
     event_triggered = None
     event_reward = None
@@ -717,6 +776,7 @@ def submit_dungeon_value(req: schemas.SubmitValueRequest, db: Session = Depends(
     
     if is_correct:
         target_cell["user_val"] = req.val
+        target_cell["is_error"] = False
         
         # 寫入正確填寫基礎日誌
         add_action_log(
@@ -742,11 +802,12 @@ def submit_dungeon_value(req: schemas.SubmitValueRequest, db: Session = Depends(
                     event_reward = "擊中弱點，但 Boss 護盾早已是破碎狀態"
             
             elif event_triggered == "CHEST":
-                if random.random() < 0.5:
-                    gold_got = random.randint(50, 100)
+                if progress.has_clover:
+                    # 🍀 四葉草加倍獎勵：雙倍金幣 + 必得道具
+                    gold_got = random.randint(50, 100) * 2
                     user.gold += gold_got
-                    event_reward = f"獲得了 {gold_got} 金幣"
-                else:
+                    event_reward = f"【四葉草加持 🍀】獲得雙倍金幣 {gold_got}"
+                    
                     items = db.query(models.Item).all()
                     if items:
                         drawn_item = random.choice(items)
@@ -759,8 +820,30 @@ def submit_dungeon_value(req: schemas.SubmitValueRequest, db: Session = Depends(
                             db.add(inventory)
                         else:
                             inventory.quantity += 1
-                        event_reward = f"獲得道具：{drawn_item.name}"
-                add_action_log(db, req.user_id, user.current_floor, "EVENT", f"解鎖寶箱格！{event_reward}。")
+                        event_reward += f"，並且額外尋獲道具：{drawn_item.name}"
+                    
+                    progress.has_clover = False
+                    add_action_log(db, req.user_id, user.current_floor, "EVENT", f"幸運四葉草 🍀 綻放光芒！解鎖寶箱格：{event_reward}！")
+                else:
+                    if random.random() < 0.5:
+                        gold_got = random.randint(50, 100)
+                        user.gold += gold_got
+                        event_reward = f"獲得了 {gold_got} 金幣"
+                    else:
+                        items = db.query(models.Item).all()
+                        if items:
+                            drawn_item = random.choice(items)
+                            inventory = db.query(models.PlayerInventory).filter(
+                                models.PlayerInventory.user_id == req.user_id,
+                                models.PlayerInventory.item_id == drawn_item.id
+                            ).first()
+                            if not inventory:
+                                inventory = models.PlayerInventory(user_id=req.user_id, item_id=drawn_item.id, quantity=1)
+                                db.add(inventory)
+                            else:
+                                inventory.quantity += 1
+                            event_reward = f"獲得道具：{drawn_item.name}"
+                    add_action_log(db, req.user_id, user.current_floor, "EVENT", f"解鎖寶箱格！{event_reward}。")
             
             elif event_triggered == "MONSTER":
                 user.gold += 80
@@ -813,8 +896,8 @@ def submit_dungeon_value(req: schemas.SubmitValueRequest, db: Session = Depends(
                 else:
                     event_reward = boss_msg
 
-        # --- Boss 主動技能反擊 (15% 機率) ---
-        if progress.boss_name and progress.boss_hp > 0 and random.random() < 0.15:
+        # --- Boss 主動技能反擊 (8% 機率) ---
+        if progress.boss_name and progress.boss_hp > 0 and random.random() < 0.08:
             if random.random() < 0.5:
                 progress.cursed_number = random.randint(1, 9)
                 event_triggered = "BOSS_SKILL"
@@ -823,13 +906,13 @@ def submit_dungeon_value(req: schemas.SubmitValueRequest, db: Session = Depends(
             else:
                 resolved_cells = [c for c in cells if not c["is_given"] and c["user_val"] > 0]
                 if resolved_cells:
-                    spray_targets = random.sample(resolved_cells, min(len(resolved_cells), 3))
+                    spray_targets = random.sample(resolved_cells, min(len(resolved_cells), 1))
                     for tgt in spray_targets:
                         tgt["is_foggy"] = True
                         tgt["user_val"] = 0
                     event_triggered = "BOSS_SKILL"
-                    event_reward = "Boss 施放墨汁噴灑！盤面上的部分已解格子被墨汁遮蔽了。"
-                    add_action_log(db, req.user_id, user.current_floor, "BOSS_SKILL", "Boss 施放墨汁噴灑！盤面上的 3 個已解開格子被強行遮蔽！")
+                    event_reward = "Boss 施放墨汁噴灑！盤面上的 1 個已解格子被墨汁遮蔽了。"
+                    add_action_log(db, req.user_id, user.current_floor, "BOSS_SKILL", "Boss 施放墨汁噴灑！盤面上的 1 個已解開格子被強行遮蔽！")
 
         # 連動技術成就：數字偏執狂累加
         stat = db.query(models.NumberStats).filter(
@@ -890,27 +973,41 @@ def submit_dungeon_value(req: schemas.SubmitValueRequest, db: Session = Depends(
             progress.cursed_number = 0
     else:
         damage = 20 if target_cell["event_type"] == "TRAP" else 10
+        strawman_active = progress.has_strawman
+        
+        if strawman_active:
+            damage = 0
+            progress.has_strawman = False
+            
         progress.current_hp -= damage
+        progress.time_left = max(0, progress.time_left - 10)
+        target_cell["user_val"] = req.val
+        target_cell["is_error"] = True
         
         # 寫入填錯日誌
-        err_msg = f"於座標 ({req.row}, {req.col}) 填入錯誤數字 {req.val}（正確為 {target_cell['solution']}）。"
-        if target_cell["event_type"] == "TRAP":
+        err_msg = f"於座標 ({req.row}, {req.col}) 填入錯誤數字 {req.val}（正確為 {target_cell['solution']}），時間扣除 10 秒（賸餘 {progress.time_left} 秒）。"
+        if strawman_active:
+            err_msg = f"於座標 ({req.row}, {req.col}) 填入錯誤數字 {req.val}（正確為 {target_cell['solution']}），【替身草人 🌾 生效】免除扣血傷害！但挑戰時間依然扣除 10 秒（賸餘 {progress.time_left} 秒）。"
+            add_action_log(db, req.user_id, user.current_floor, "EVENT", f"替身草人 🌾 替代受罰！抵擋了座標 ({req.row}, {req.col}) 填錯的扣血處罰。")
+        elif target_cell["event_type"] == "TRAP":
             err_msg += f"觸發陷阱！扣除雙倍生命值 20 點（當前 HP: {progress.current_hp}）。"
         else:
             err_msg += f"扣除生命值 10 點（當前 HP: {progress.current_hp}）。"
         add_action_log(db, req.user_id, user.current_floor, "SUBMIT_WRONG", err_msg)
         
-        if progress.current_hp <= 0:
+        if progress.current_hp <= 0 or progress.time_left <= 0:
             user.gold = max(0, user.gold - 100)
+            reason = "生命值歸零" if progress.current_hp <= 0 else "時間倒數完畢"
             
             add_action_log(
                 db, req.user_id, user.current_floor, "DEFEAT",
-                f"挑戰失敗！生命值歸零。地牢進度已重置，並扣除 100 金幣（賸餘金幣：{user.gold}）"
+                f"挑戰失敗！{reason}。地牢進度已重置，並扣除 100 金幣（賸餘金幣：{user.gold}）"
             )
             
             reset_board = generate_sudoku_board("MEDIUM")
             progress.board_state = json.dumps(reset_board)
             progress.current_hp = 100
+            progress.time_left = 180
             progress.elapsed_time = 0
             progress.boss_name = None
             progress.boss_hp = 0
@@ -918,11 +1015,14 @@ def submit_dungeon_value(req: schemas.SubmitValueRequest, db: Session = Depends(
             progress.boss_shield = 0
             progress.boss_max_shield = 0
             progress.cursed_number = 0
+            progress.has_strawman = False
+            progress.has_clover = False
+            progress.has_seal = False
             db.commit()
             
             raise HTTPException(
                 status_code=400,
-                detail=f"挑戰失敗！生命值歸零。地牢進度已重置，並扣除 100 金幣（目前賸餘金幣：{user.gold}）"
+                detail=f"挑戰失敗！{reason}。地牢進度已重置，並扣除 100 金幣（目前賸餘金幣：{user.gold}）"
             )
             
     if not is_cleared:
@@ -981,10 +1081,11 @@ def use_dungeon_item(req: schemas.UseItemRequest, db: Session = Depends(get_db))
                 break
         if not target_cell:
             raise HTTPException(status_code=404, detail="Target cell not found")
-        if target_cell["is_given"] or target_cell["user_val"] != 0:
+        if target_cell["is_given"] or (target_cell["user_val"] != 0 and not target_cell.get("is_error", False)):
             raise HTTPException(status_code=400, detail="Target cell is already resolved")
             
         target_cell["user_val"] = target_cell["solution"]
+        target_cell["is_error"] = False
         target_cell["is_given"] = True
         if target_cell["event_type"]:
             target_cell["is_triggered"] = True
@@ -1024,6 +1125,68 @@ def use_dungeon_item(req: schemas.UseItemRequest, db: Session = Depends(get_db))
         inventory.quantity -= 1
         board_updated = True
         message = f"成功使用淨化聖水！數字詛咒已解除，被遮蔽的 {cleared_count} 個格子已還原。"
+    elif req.item_name == "時光沙漏":
+        progress.time_left = min(300, progress.time_left + 60)
+        inventory.quantity -= 1
+        message = f"成功使用時光沙漏 ⏳！本層挑戰時間延長 60 秒（目前賸餘 {progress.time_left} 秒）。"
+        
+    elif req.item_name == "替身草人":
+        progress.has_strawman = True
+        inventory.quantity -= 1
+        message = "成功使用替身草人 🌾！已獲得一次填錯數字免受 HP 傷害的防護護盾。"
+        
+    elif req.item_name == "幸運四葉草":
+        progress.has_clover = True
+        inventory.quantity -= 1
+        message = "成功使用幸運四葉草 🍀！下一次開啟寶箱格時，獲得金幣翻倍且必定額外獲得一個道具。"
+        
+    elif req.item_name == "封印符咒":
+        progress.has_seal = True
+        inventory.quantity -= 1
+        message = "成功使用封印符咒 📜！下一個遭遇的陷阱格填錯將免受懲罰，並直接強制破解為正確答案。"
+        
+    elif req.item_name == "鉛筆":
+        if req.row is None or req.col is None:
+            raise HTTPException(status_code=400, detail="Using '鉛筆' requires 'row' and 'col' coordinates")
+        target_cell = None
+        for cell in cells:
+            if cell["row"] == req.row and cell["col"] == req.col:
+                target_cell = cell
+                break
+        if not target_cell:
+            raise HTTPException(status_code=404, detail="Target cell not found")
+        if target_cell["is_given"] or (target_cell["user_val"] != 0 and not target_cell.get("is_error", False)):
+            raise HTTPException(status_code=400, detail="Target cell is already resolved")
+            
+        solution = target_cell["solution"]
+        other_nums = [n for n in range(1, 10) if n != solution]
+        wrong_notes = random.sample(other_nums, 2)
+        notes = sorted([solution] + wrong_notes)
+        
+        target_cell["pencil_notes"] = notes
+        inventory.quantity -= 1
+        board_updated = True
+        message = f"成功使用鉛筆 ✏️！已在座標 ({req.row}, {req.col}) 標記草稿數字 {notes}。"
+        
+    elif req.item_name == "指南針":
+        if req.row is None or req.col is None:
+            raise HTTPException(status_code=400, detail="Using '指南針' requires 'row' and 'col' coordinates")
+        
+        row_sol = set()
+        col_sol = set()
+        for cell in cells:
+            if cell["row"] == req.row:
+                if not cell["is_given"] and (cell["user_val"] == 0 or cell.get("is_error", False)):
+                    row_sol.add(cell["solution"])
+            if cell["col"] == req.col:
+                if not cell["is_given"] and (cell["user_val"] == 0 or cell.get("is_error", False)):
+                    col_sol.add(cell["solution"])
+                    
+        row_missing = sorted(list(row_sol))
+        col_missing = sorted(list(col_sol))
+        
+        inventory.quantity -= 1
+        message = f"指南針 🧭 指向座標 ({req.row}, {req.col})！偵測到第 {req.row + 1} 行尚缺數字 {row_missing}，第 {req.col + 1} 列尚缺數字 {col_missing}。"
     else:
         raise HTTPException(status_code=400, detail=f"Item '{req.item_name}' logic not implemented yet")
         
@@ -1039,4 +1202,50 @@ def use_dungeon_item(req: schemas.UseItemRequest, db: Session = Depends(get_db))
         message=message,
         current_hp=progress.current_hp,
         board_updated=board_updated
+    )
+
+# 地牢超時重置 API
+@app.post("/dungeon/timeout", response_model=schemas.DungeonBoardResponse)
+def dungeon_timeout(req: schemas.GenerateBoardRequest, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == req.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    progress = db.query(models.DungeonProgress).filter(models.DungeonProgress.user_id == req.user_id).first()
+    if not progress:
+        raise HTTPException(status_code=400, detail="No active dungeon board for this user")
+        
+    reset_board = generate_sudoku_board("MEDIUM")
+    progress.board_state = json.dumps(reset_board)
+    progress.current_hp = 100
+    progress.boss_name = None
+    progress.boss_hp = 0
+    progress.boss_max_hp = 0
+    progress.boss_shield = 0
+    progress.boss_max_shield = 0
+    progress.cursed_number = 0
+    progress.time_left = 180
+    progress.has_strawman = False
+    progress.has_clover = False
+    progress.has_seal = False
+    
+    add_action_log(db, req.user_id, user.current_floor, "DEFEAT", "地牢挑戰超時！超時重置盤面。")
+    db.commit()
+    db.refresh(progress)
+    
+    return schemas.DungeonBoardResponse(
+        user_id=progress.user_id,
+        current_hp=progress.current_hp,
+        max_hp=progress.max_hp,
+        boss_name=progress.boss_name,
+        boss_hp=progress.boss_hp,
+        boss_max_hp=progress.boss_max_hp,
+        boss_shield=progress.boss_shield,
+        boss_max_shield=progress.boss_max_shield,
+        cursed_number=progress.cursed_number,
+        time_left=progress.time_left,
+        has_strawman=progress.has_strawman,
+        has_clover=progress.has_clover,
+        has_seal=progress.has_seal,
+        cells=reset_board
     )

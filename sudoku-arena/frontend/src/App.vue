@@ -10,13 +10,87 @@ const boss = ref({ name: null, hp: 0, max_hp: 0, shield: 0, max_shield: 0, curse
 
 // 道具背包
 const inventory = ref([
-  { name: '透視放大鏡', icon: '🔍', quantity: 0, description: '直接揭曉並填對盤面上任意一格答案。' },
-  { name: '炸彈', icon: '💣', quantity: 0, description: '直接排除盤面上任意一格的怪物或陷阱事件。' },
-  { name: '生命藥水', icon: '🧪', quantity: 0, description: '直接恢復玩家 30 點生命值 (HP)。' },
-  { name: '淨化聖水', icon: '✨', quantity: 0, description: '解除 Boss 施放的數字詛咒，並復原所有被墨汁遮蔽的格子。' }
+  { name: '透視放大鏡', icon: '🔍', quantity: 0, description: '直接顯示任意一格的正確答案。' },
+  { name: '炸彈', icon: '💣', quantity: 0, description: '直接消滅盤面上的任意一隻小怪，不需解開該格子。' },
+  { name: '生命藥水', icon: '🧪', quantity: 0, description: '回復玩家 30% 的生命值 (HP)。' },
+  { name: '淨化聖水', icon: '✨', quantity: 0, description: '解除 Boss 施放的數字詛咒，並復原所有被墨汁遮蔽的格子。' },
+  { name: '時光沙漏', icon: '⏳', quantity: 0, description: '增加該層的挑戰倒數計時時間 60 秒。' },
+  { name: '替身草人', icon: '🌾', quantity: 0, description: '抵擋下一次填錯數字所受到的 HP 懲罰。' },
+  { name: '幸運四葉草', icon: '🍀', quantity: 0, description: '使下一次開啟寶箱格時，獲得金幣翻倍且必定獲得道具。' },
+  { name: '鉛筆', icon: '✏️', quantity: 0, description: '在空格子上記錄正確答案的 3 個可能候選數作為草稿。' },
+  { name: '指南針', icon: '🧭', quantity: 0, description: '提示所選格子所在的整行與整列中，尚未填寫的數字。' },
+  { name: '封印符咒', icon: '📜', quantity: 0, description: '讓下一個遭遇的陷阱格失效，填錯免受罰且強制破除。' }
 ])
 const activeItemMode = ref(null) // 目前選中要施放的道具名稱
 const hoveredItemName = ref(null)
+
+const timeLeft = ref(180)
+const hasStrawman = ref(false)
+const hasClover = ref(false)
+const hasSeal = ref(false)
+let timerId = null
+
+// 啟動定時倒數
+const startTimer = () => {
+  if (timerId) clearInterval(timerId)
+  timerId = setInterval(async () => {
+    if (timeLeft.value > 0) {
+      timeLeft.value--
+      if (timeLeft.value === 0) {
+        await handleTimeout()
+      }
+    }
+  }, 1000)
+}
+
+const stopTimer = () => {
+  if (timerId) {
+    clearInterval(timerId)
+    timerId = null
+  }
+}
+
+// 處理超時重置
+const handleTimeout = async () => {
+  stopTimer()
+  try {
+    const res = await fetch(`${API_BASE}/dungeon/timeout`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId.value, difficulty: 'MEDIUM' })
+    })
+    if (res.ok) {
+      const data = await res.json()
+      updateDungeonState(data)
+      await fetchLogs()
+      showToast('⏳ 時間到！挑戰超時，地牢盤面已被重置！', 'error')
+    }
+  } catch (err) {
+    console.error('Timeout error:', err)
+  }
+}
+
+const updateDungeonState = (data) => {
+  board.value = data.cells
+  boardState.value.current_hp = data.current_hp
+  boardState.value.max_hp = data.max_hp
+  
+  // Boss 資訊
+  boss.value.name = data.boss_name
+  boss.value.hp = data.boss_hp
+  boss.value.max_hp = data.boss_max_hp
+  boss.value.shield = data.boss_shield
+  boss.value.max_shield = data.boss_max_shield
+  boss.value.cursed_number = data.cursed_number
+  
+  // 增益狀態與賸餘時間
+  timeLeft.value = data.time_left ?? 180
+  hasStrawman.value = data.has_strawman ?? false
+  hasClover.value = data.has_clover ?? false
+  hasSeal.value = data.has_seal ?? false
+  
+  startTimer()
+}
 
 const selectedItemInfo = computed(() => {
   const activeName = hoveredItemName.value || activeItemMode.value
@@ -151,17 +225,7 @@ const fetchBoard = async () => {
     const res = await fetch(`${API_BASE}/dungeon/${userId.value}/board`)
     if (res.ok) {
       const data = await res.json()
-      board.value = data.cells
-      boardState.value.current_hp = data.current_hp
-      boardState.value.max_hp = data.max_hp
-      
-      // Boss 資訊
-      boss.value.name = data.boss_name
-      boss.value.hp = data.boss_hp
-      boss.value.max_hp = data.boss_max_hp
-      boss.value.shield = data.boss_shield
-      boss.value.max_shield = data.boss_max_shield
-      boss.value.cursed_number = data.cursed_number
+      updateDungeonState(data)
     } else {
       // 若無盤面，則自動生成一個普通盤面
       await generateBoard('MEDIUM')
@@ -289,7 +353,7 @@ const handleCellClick = async (cell) => {
     activeItemMode.value = null
   } else {
     // 普通選取模式
-    if (cell.is_given || cell.user_val > 0) return
+    if (cell.is_given || (cell.user_val > 0 && !cell.is_error)) return
     selectedCell.value = cell
   }
 }
@@ -327,7 +391,8 @@ const submitValue = async (val) => {
 
 // 背包點擊道具
 const selectItem = async (itemName) => {
-  if (itemName === '生命藥水' || itemName === '淨化聖水') {
+  const immediateItems = ['生命藥水', '淨化聖水', '時光沙漏', '替身草人', '幸運四葉草', '封印符咒']
+  if (immediateItems.includes(itemName)) {
     // 立即使用道具，不需要選擇座標
     await useItemOnCell(itemName, null, null)
   } else {
@@ -425,6 +490,7 @@ onUnmounted(() => {
   if (resizeObserver) {
     resizeObserver.disconnect()
   }
+  stopTimer()
 })
 </script>
 
@@ -446,6 +512,19 @@ onUnmounted(() => {
         <div class="status-item">
           <span class="icon-pixel">🧗</span>
           <span>第 {{ user.current_floor }} 層</span>
+        </div>
+        
+        <!-- Time Left -->
+        <div class="status-item timer-item" :class="{ 'warning-time': timeLeft <= 30 }">
+          <span class="icon-pixel">⏳</span>
+          <span>{{ timeLeft }} 秒</span>
+        </div>
+
+        <!-- Buffs -->
+        <div v-if="hasStrawman || hasClover || hasSeal" class="status-item" style="gap: 4px;">
+          <div v-if="hasStrawman" class="buff-badge border-pixel" style="background-color: #fef08a;" title="替身草人：免除填錯傷害">🌾 草人</div>
+          <div v-if="hasClover" class="buff-badge border-pixel" style="background-color: #bbf7d0;" title="幸運四葉草：寶箱翻倍+必得道具">🍀 四葉草</div>
+          <div v-if="hasSeal" class="buff-badge border-pixel" style="background-color: #fed7aa;" title="封印符咒：免除填錯陷阱格傷害並直接破解">📜 封印</div>
         </div>
         
         <!-- HP 血條 -->
@@ -543,10 +622,10 @@ onUnmounted(() => {
           <h2 class="panel-title">🧙 英雄召喚</h2>
           <div style="display: flex; gap: 8px; margin-bottom: 16px;">
             <button class="btn-pixel" style="flex: 1; font-size: 12px;" @click="drawGacha(1)">
-              召喚 1 次 (100💎)
+              召喚 1 次<br>(100💎)
             </button>
             <button class="btn-pixel blue" style="flex: 1; font-size: 12px;" @click="drawGacha(10)">
-              召喚 10 次 (1000💎)
+              召喚 10 次<br>(1000💎)
             </button>
           </div>
           
@@ -621,12 +700,16 @@ onUnmounted(() => {
             @click="handleCellClick(cell)"
           >
             <!-- 數字呈現 -->
-            <span v-if="cell.user_val > 0 && !cell.is_foggy" style="color: var(--btn-blue);">
+            <span v-if="cell.user_val > 0 && !cell.is_foggy" :style="{ color: cell.is_error ? '#ff4757' : '#2ecc71' }" style="font-weight: 700;">
               {{ cell.user_val }}
             </span>
             <span v-else-if="cell.val > 0 && !cell.is_foggy">
               {{ cell.val }}
             </span>
+            <!-- ✏️ 鉛筆草稿數字 -->
+            <div v-else-if="cell.pencil_notes && cell.pencil_notes.length > 0 && !cell.is_foggy" class="pencil-notes-container">
+              <span v-for="note in cell.pencil_notes" :key="note" class="pencil-note">{{ note }}</span>
+            </div>
             
             <!-- 事件圖標 -->
             <div v-if="cell.event_type && !cell.is_triggered" class="cell-event" :title="getEventName(cell.event_type)">
