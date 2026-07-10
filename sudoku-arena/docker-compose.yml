@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app # 熱重載核心：把外面的資料夾同步到裡面
+      - /app/.venv # 防止同步本機的 .venv
+      - /app/__pycache__ # 防止同步本機的 __pycache__
+    environment:
+      - DB_URL=sqlite:///sudoku.db
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app # 熱重載核心
+      - /app/node_modules # 防止裡外的 node_modules 衝突
+    depends_on:
+      - backend

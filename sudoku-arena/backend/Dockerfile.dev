@@ -1,0 +1,6 @@
+FROM python:3.10-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+# 注意：我們這裡不 COPY 程式碼，因為等一下會用 volume 掛載
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
